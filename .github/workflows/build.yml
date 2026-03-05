@@ -23,6 +23,7 @@ jobs:
           repository: MrPankaj24/timepass-work
           ref: main
           fetch-depth: 1
+          submodules: 'recursive'  # <--- THIS TELLS GITHUB TO DOWNLOAD RESUKISU
 
       # ──────────────────────────────────────────────
       # 2. Install dependencies
@@ -110,16 +111,6 @@ jobs:
           export ANDROID_MAJOR_VERSION=v
           export ARCH=arm64
           export TARGET_SOC=s5e8535
-
-          # ── Bypass ReSukiSU Submodule Check ──
-          echo ">>> Faking a git repo in drivers/kernelsu to bypass checks..."
-          cd drivers/kernelsu
-          git init
-          git config user.name "Builder"
-          git config user.email "builder@kernel.org"
-          git add Kbuild
-          git commit -m "dummy commit to bypass Kbuild checks"
-          cd ../..
 
           # ── Step 1: Generate .config ──
           echo ">>> Generating base defconfig..."
