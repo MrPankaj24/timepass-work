@@ -1,7 +1,7 @@
-name: 🏗️ Build Kernel (s5e8535 / M14 with KernelSU-Next)
+name: 🏗️ Build Kernel (s5e8535 / M14)
 
-#on:
-# push:
+on:
+#  push:
 #    branches: [ main ]
 #  pull_request:
 #    branches: [ main ]
@@ -23,15 +23,6 @@ jobs:
           repository: MrPankaj24/SM-M146B-Kernel-Source
           ref: main
           fetch-depth: 1
-
-      # ──────────────────────────────────────────────
-      # 1.5. Patch KernelSU-Next
-      # ──────────────────────────────────────────────
-      - name: 🛡️ Patch KernelSU-Next
-        run: |
-          echo ">>> Injecting KernelSU-Next source..."
-          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s stable
-          echo "✅ KernelSU-Next (Stable) integrated successfully!"
 
       # ──────────────────────────────────────────────
       # 2. Install dependencies
@@ -70,7 +61,7 @@ jobs:
             toolchain/prebuilts/kernel-build-tools
           key: toolchain-clang-r450784d-kernel-build-tools-v3
 
-      # ──────────────────────────────────────────────
+      # ──────────────────────────��───────────────────
       # 4. Download Clang (only if not cached)
       # ──────────────────────────────────────────────
       - name: ⬇️ Download Clang r450784d
@@ -145,21 +136,22 @@ jobs:
           echo "=== Available defconfigs for device ==="
           ls arch/arm64/configs/ | grep -i "s5e\|m14\|8535"
 
-# ──────────────────────────────────────────────
-      # 8. Compile the Kernel (KernelSU-Next Only)
       # ──────────────────────────────────────────────
-      - name: 🔨 Compile Kernel
+      # 8. Build the Kernel
+      # ──────────────────────────────────────────────
+      - name: 🔨 Build Kernel
         run: |
           set -e
-          set -o pipefail
 
           # ── Set up toolchain PATHs ──
           export PATH=$(pwd)/toolchain/clang/host/linux-x86/clang-r450784d/bin:$PATH
           export PATH=$(pwd)/toolchain/build/kernel/build-tools/path/linux-x86/:$PATH
-          
-          # ── Host build flags ──
+
+          # ── Host build flags (use system glibc, not musl sysroot) ──
           export HOSTCFLAGS="-I$(pwd)/toolchain/prebuilts/kernel-build-tools/linux-x86/include"
-          export HOSTLDFLAGS="-Wl,-rpath,$(pwd)/toolchain/prebuilts/kernel-build-tools/linux-x86/lib64 -L$(pwd)/toolchain/prebuilts/kernel-build-tools/linux-x86/lib64 -fuse-ld=lld --rtlib=compiler-rt"
+          export HOSTLDFLAGS="-Wl,-rpath,$(pwd)/toolchain/prebuilts/kernel-build-tools/linux-x86/lib64 \
+            -L$(pwd)/toolchain/prebuilts/kernel-build-tools/linux-x86/lib64 \
+            -fuse-ld=lld --rtlib=compiler-rt"
 
           # ── Kernel build environment ──
           export DTC_FLAGS="-@"
@@ -170,32 +162,97 @@ jobs:
           export ARCH=arm64
           export TARGET_SOC=s5e8535
 
-          echo ">>> Generating Base Config..."
+          echo "PLATFORM_VERSION = $PLATFORM_VERSION"
+          echo "ANDROID_MAJOR_VERSION = $ANDROID_MAJOR_VERSION"
+          echo "ARCH = $ARCH"
+
+          # ── Step 1: Generate .config from defconfig ──
+          echo ">>> Generating defconfig..."
           make s5e8535-m14xnsxx_defconfig
 
-          echo ">>> Injecting KernelSU-Next config..."
-          cat >> .config << 'EOF'
+          # ── Step 2: Inject Custom Configs ──
+          echo ">>> Injecting KSU, SUSFS, and Network configs..."
+          cat >> .config <<'EOF'
+          # [base]
           CONFIG_KSU=y
-          CONFIG_KSU_MANUAL_HOOK=y
+          CONFIG_IP_NF_TARGET_TTL=y
+          CONFIG_IP6_NF_TARGET_HL=y
+          CONFIG_IP6_NF_MATCH_HL=y
+          CONFIG_TCP_CONG_ADVANCED=y
+          CONFIG_TCP_CONG_BBR=y
+          CONFIG_NET_SCH_FQ=y
+          CONFIG_TCP_CONG_CUBIC=y
+          CONFIG_TCP_CONG_BIC=n
+          CONFIG_TCP_CONG_WESTWOOD=y
+          CONFIG_TCP_CONG_HTCP=y
+          CONFIG_IP_SET=y
+          CONFIG_IP_SET_MAX=65534
+          CONFIG_IP_SET_BITMAP_IP=y
+          CONFIG_IP_SET_BITMAP_IPMAC=y
+          CONFIG_IP_SET_BITMAP_PORT=y
+          CONFIG_IP_SET_HASH_IP=y
+          CONFIG_IP_SET_HASH_IPMARK=y
+          CONFIG_IP_SET_HASH_IPPORT=y
+          CONFIG_IP_SET_HASH_IPPORTIP=y
+          CONFIG_IP_SET_HASH_IPPORTNET=y
+          CONFIG_IP_SET_HASH_IPMAC=y
+          CONFIG_IP_SET_HASH_MAC=y
+          CONFIG_IP_SET_HASH_NETPORTNET=y
+          CONFIG_IP_SET_HASH_NET=y
+          CONFIG_IP_SET_HASH_NETNET=y
+          CONFIG_IP_SET_HASH_NETPORT=y
+          CONFIG_IP_SET_HASH_NETIFACE=y
+          CONFIG_IP_SET_LIST_SET=y
+          CONFIG_KALLSYMS=y
+          CONFIG_KALLSYMS_ALL=y
+
+          # [susfs]
+          CONFIG_KSU_SUSFS=y
+          CONFIG_KSU_SUSFS_SUS_PATH=y
+          CONFIG_KSU_SUSFS_SUS_MOUNT=y
+          CONFIG_KSU_SUSFS_SUS_KSTAT=y
+          CONFIG_KSU_SUSFS_SUS_KSTAT_REDIRECT=y
+          CONFIG_KSU_SUSFS_SUS_MAP=y
+          CONFIG_KSU_SUSFS_SPOOF_UNAME=y
+          CONFIG_KSU_SUSFS_ENABLE_LOG=y
+          CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
+          CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
+          CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
+          CONFIG_KSU_SUSFS_UNICODE_FILTER=y
+          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y
+          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y
+          CONFIG_KSU_SUSFS_HIDDEN_NAME=y
+          CONFIG_KSU_SUSFS_HARDENED=y
+
+          # [overlayfs]
+          CONFIG_TMPFS_XATTR=y
+          CONFIG_TMPFS_POSIX_ACL=y
+          
+          # [KSU & Kprobes Dependencies]
+          CONFIG_KPROBES=y
+          CONFIG_HAVE_KPROBES=y
+          CONFIG_KPROBE_EVENTS=y
+          CONFIG_THREAD_INFO_IN_TASK=y
+          
           EOF
 
-          # Clean up any accidental leading spaces from the EOF injection
-          sed -i 's/^[[:space:]]*//' .config
-
-          echo ">>> Applying new configuration..."
+          # Clean up any leading spaces created by YAML indentation
+          sed -i 's/^[ \t]*//' .config
+          
+          # ── Step 3: Apply configs and resolve dependencies ──
+          echo ">>> Running olddefconfig to apply injected options..."
           make olddefconfig
 
-          echo ">>> Config verification:"
-          grep -E "CONFIG_KSU" .config || true
+          # Hard disable BTF again after olddefconfig just to be safe
+          sed -i '/CONFIG_DEBUG_INFO_BTF/d' .config
+          echo "# CONFIG_DEBUG_INFO_BTF is not set" >> .config
 
-          # ── Disable CONFIG_DEBUG_INFO_BTF if pahole is too old ──
-          PAHOLE_VER=$(pahole --version 2>/dev/null | grep -oP '[0-9]+\.[0-9]+' | head -1)
-          echo "pahole version: $PAHOLE_VER"
-
-          echo ">>> Compiling ($(nproc) threads)..."
+          # ── Step 4: Build kernel ──
+          echo ">>> Building kernel with $(nproc) jobs..."
           make -j$(nproc) 2>&1 | tee /tmp/kernel_build.log
 
           echo "✅ Build completed!"
+
       # ──────────────────────────────────────────────
       # 9. Collect build artifacts
       # ──────────────────────────────────────────────
@@ -234,7 +291,7 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-s5e8535-m14-kernelsu-next
+          name: kernel-s5e8535-m14-android15
           path: out/
           if-no-files-found: warn
           retention-days: 30
