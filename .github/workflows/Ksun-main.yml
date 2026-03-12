@@ -1,4 +1,4 @@
-name: 🏗️ Build Kernel (s5e8535 / M14)
+name: 🏗️ Build Kernel (s5e8535 test / M14)
 
 on:
 #  push:
