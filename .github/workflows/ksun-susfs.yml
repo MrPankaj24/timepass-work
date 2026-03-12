@@ -1,0 +1,320 @@
+name: 🏗️ Build Kernel (KSU-Next + SUSFS)
+
+# Full workflow:
+# - checkout kernel source
+# - prepare toolchain & deps
+# - inject KernelSU-Next
+# - clone the SUSFS branch (single-branch shallow clone)
+# - copy any missing files referenced by the SUSFS patch into the kernel tree
+# - attempt to apply only 50_add_susfs_in_<branch>.patch, collect rejects/logs if any
+# - build kernel and upload artifacts
+
+on:
+#  push:
+#    branches: [ main ]
+#  pull_request:
+#    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build-kernel:
+    name: 🏗️ Build s5e8535 / M14
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+
+    env:
+      SUSFS_BRANCH: "gki-android13-5.15"
+      SUSFS_URL: "https://gitlab.com/simonpunk/susfs4ksu.git"
+
+    steps:
+      - name: 📥 Checkout Kernel Source
+        uses: actions/checkout@v4
+        with:
+          repository: MrPankaj24/SM-M146B-Kernel-Source
+          ref: main
+          fetch-depth: 1
+
+      - name: 📦 Install Build Dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            git curl wget bc bison flex libssl-dev libelf-dev python3 python-is-python3 \
+            make gcc gcc-aarch64-linux-gnu binutils binutils-aarch64-linux-gnu \
+            g++ cpio zip unzip lz4 zstd xz-utils libncurses-dev libncurses5-dev \
+            kmod rsync lld llvm clang dwarves pahole ccache device-tree-compiler \
+            zlib1g-dev libc6-dev-i386 cmake ninja-build
+
+      - name: 🔧 Cache Toolchains
+        id: cache-toolchain
+        uses: actions/cache@v4
+        with:
+          path: |
+            toolchain/clang/host/linux-x86/clang-r450784d
+            toolchain/build/kernel/build-tools
+            toolchain/prebuilts/kernel-build-tools
+          key: toolchain-clang-r450784d-v1
+
+      - name: ⬇️ Download Clang r450784d (AOSP)
+        if: steps.cache-toolchain.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p toolchain/clang/host/linux-x86/clang-r450784d
+          echo "Downloading Clang r450784d..."
+          curl -L "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android13-release/clang-r450784d.tar.gz" -o /tmp/clang.tar.gz
+          tar -xzf /tmp/clang.tar.gz -C toolchain/clang/host/linux-x86/clang-r450784d
+          rm /tmp/clang.tar.gz
+
+      - name: ⬇️ Download Kernel Build Tools
+        if: steps.cache-toolchain.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth=1 -b main https://android.googlesource.com/kernel/prebuilts/build-tools toolchain/build/kernel/build-tools
+          mkdir -p toolchain/build/kernel/build-tools/path
+          ln -sf $(pwd)/toolchain/build/kernel/build-tools/linux-x86 toolchain/build/kernel/build-tools/path/linux-x86
+          ln -sf $(pwd)/toolchain/build/kernel/build-tools/sysroots/x86_64-unknown-linux-musl toolchain/build/kernel/build-tools/sysroot
+
+      - name: ⬇️ Download Prebuilt Tools (for pahole)
+        if: steps.cache-toolchain.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth=1 https://android.googlesource.com/kernel/prebuilts/build-tools toolchain/prebuilts/kernel-build-tools
+
+      - name: 🛡️ Patch KernelSU-Next
+        run: |
+          echo ">>> Injecting KernelSU-Next..."
+          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s stable
+
+      - name: 🥷 Clone SUSFS (shallow single-branch)
+        run: |
+          set -e
+          echo ">>> Cloning SUSFS branch ${SUSFS_BRANCH}..."
+          rm -rf /tmp/susfs4ksu
+          git clone --depth=1 --single-branch --branch "${SUSFS_BRANCH}" "${SUSFS_URL}" /tmp/susfs4ksu || {
+            echo ">>> ERROR: clone failed for ${SUSFS_BRANCH}. Listing remote heads:"
+            git ls-remote --heads "${SUSFS_URL}" | sed 's/.*refs\/heads\///' || true
+            exit 1
+          }
+          echo ">>> Cloned /tmp/susfs4ksu"
+
+      - name: 📁 Copy missing files from SUSFS that patch requires
+        id: copy-missing
+        run: |
+          #!/usr/bin/env bash
+          set -euo pipefail
+          PATCH_FILE="/tmp/susfs4ksu/kernel_patches/50_add_susfs_in_${SUSFS_BRANCH}.patch"
+          if [ ! -f "$PATCH_FILE" ]; then
+            echo ">>> ERROR: patch not found: $PATCH_FILE"
+            echo ">>> kernel_patches listing:"
+            ls -la /tmp/susfs4ksu/kernel_patches || true
+            exit 1
+          fi
+
+          echo ">>> Parsing patch for target files..."
+          grep '^diff --git' "$PATCH_FILE" | awk '{print $3, $4}' \
+            | sed 's#^a/##; s#^b/##; s# b/##g' \
+            | tr ' ' '\n' \
+            | sed '/^$/d' | sort -u > /tmp/patch_targets.txt || true
+
+          echo ">>> Patch target files:"
+          sed -n '1,200p' /tmp/patch_targets.txt || true
+
+          echo ">>> Copying any target files that are missing in kernel tree from SUSFS repo..."
+          > /tmp/copied_files.txt
+          while read -r f; do
+            [ -z "$f" ] && continue
+            # prefer the 'b/' path if present in patch_headers, else file path as-is
+            candidate="/tmp/susfs4ksu/${f}"
+            if [ ! -e "$f" ]; then
+              if [ -e "$candidate" ]; then
+                echo "Copying missing file: $f"
+                mkdir -p "$(dirname "$f")"
+                cp --parents "$candidate" . || cp "$candidate" "$f"
+                echo "$f" >> /tmp/copied_files.txt
+              else
+                # try copying from kernel_patches subdirs if patch refers to files under kernel_patches/
+                if [ -e "/tmp/susfs4ksu/kernel_patches/$f" ]; then
+                  echo "Copying missing file from kernel_patches: $f"
+                  mkdir -p "$(dirname "$f")"
+                  cp --parents "/tmp/susfs4ksu/kernel_patches/$f" . || cp "/tmp/susfs4ksu/kernel_patches/$f" "$f"
+                  echo "$f" >> /tmp/copied_files.txt
+                else
+                  echo "Source for $f not found in SUSFS repo (will show up in missing list later): $candidate"
+                fi
+              fi
+            else
+              echo "Target exists, skipping copy: $f"
+            fi
+          done < /tmp/patch_targets.txt || true
+
+          echo ">>> Copied files (if any):"
+          if [ -s /tmp/copied_files.txt ]; then
+            sed -n '1,200p' /tmp/copied_files.txt
+          else
+            echo "(none)"
+          fi
+
+      - name: 🥷 Apply only SUSFS core patch (copy-aware + diagnostics)
+        id: apply-susfs-patch
+        run: |
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          PATCH_FILE="/tmp/susfs4ksu/kernel_patches/50_add_susfs_in_${SUSFS_BRANCH}.patch"
+          echo ">>> Using patch: $PATCH_FILE"
+          if [ ! -f "$PATCH_FILE" ]; then
+            echo ">>> ERROR: patch missing: $PATCH_FILE"
+            exit 1
+          fi
+
+          # cleanup previous logs
+          rm -f /tmp/patch_dryrun_p1.log /tmp/patch_dryrun_p0.log /tmp/git_apply.log || true
+          rm -rf /tmp/susfs_patch_rejects /tmp/susfs_patch_rejects.tar.gz || true
+          find . -name '*.rej' -type f -delete || true
+
+          echo ">>> Dry-run patch -p1..."
+          patch --dry-run -p1 < "$PATCH_FILE" > /tmp/patch_dryrun_p1.log 2>&1 || true
+
+          echo ">>> Dry-run patch -p0..."
+          patch --dry-run -p0 < "$PATCH_FILE" > /tmp/patch_dryrun_p0.log 2>&1 || true
+
+          # list patch targets again
+          grep '^diff --git' "$PATCH_FILE" | awk '{print $3, $4}' \
+            | sed 's#^a/##; s#^b/##; s# b/##g' \
+            | tr ' ' '\n' \
+            | sed '/^$/d' | sort -u > /tmp/patch_targets.txt || true
+
+          # missing files check
+          : > /tmp/patch_missing_files.txt
+          while read -r f; do
+            [ -z "$f" ] && continue
+            if [ ! -e "$f" ]; then
+              echo "$f" >> /tmp/patch_missing_files.txt
+            fi
+          done < /tmp/patch_targets.txt || true
+
+          if [ -s /tmp/patch_missing_files.txt ]; then
+            echo ">>> Missing files referenced by patch (these likely caused earlier 'can't find file to patch'):"
+            sed -n '1,200p' /tmp/patch_missing_files.txt || true
+          else
+            echo ">>> No missing patch targets detected."
+          fi
+
+          echo ">>> Attempting git apply with 3-way or with rejects..."
+          if git apply --3way --check "$PATCH_FILE" > /tmp/git_apply_check.log 2>&1; then
+            echo ">>> git apply --3way --check succeeded; applying 3-way..."
+            git apply --3way "$PATCH_FILE" > /tmp/git_apply.log 2>&1 || true
+          else
+            echo ">>> git apply --3way check failed; falling back to git apply --reject --whitespace=fix..."
+            git apply --reject --whitespace=fix "$PATCH_FILE" > /tmp/git_apply.log 2>&1 || true
+          fi
+
+          # collect rejects if any
+          REJ_LIST=$(find . -type f -name '*.rej' -print || true)
+          if [ -n "$REJ_LIST" ]; then
+            echo ">>> Found rejects:"
+            echo "$REJ_LIST"
+            mkdir -p /tmp/susfs_patch_rejects
+            while IFS= read -r rej; do
+              echo "---- REJECT: $rej ----"
+              sed -n '1,200p' "$rej" || true
+              cp --parents "$rej" /tmp/susfs_patch_rejects/ || true
+            done <<< "$REJ_LIST"
+            cp "$PATCH_FILE" /tmp/susfs_patch_rejects/ || true
+            cp /tmp/patch_dryrun_p1.log /tmp/susfs_patch_rejects/ || true
+            cp /tmp/patch_dryrun_p0.log /tmp/susfs_patch_rejects/ || true
+            cp /tmp/git_apply.log /tmp/susfs_patch_rejects/ || true
+            cp /tmp/patch_targets.txt /tmp/susfs_patch_rejects/ || true
+            cp /tmp/patch_missing_files.txt /tmp/susfs_patch_rejects/ || true
+            tar -C /tmp -czf /tmp/susfs_patch_rejects.tar.gz susfs_patch_rejects || true
+            echo ">>> Collected rejects archive: /tmp/susfs_patch_rejects.tar.gz"
+            echo ">>> Failing step so artifact uploads (download and inspect .rej files)"
+            exit 1
+          else
+            echo ">>> No .rej files. Check /tmp/git_apply.log and dry-run logs for details."
+            if grep -qi "error" /tmp/git_apply.log 2>/dev/null; then
+              echo ">>> git_apply.log shows errors; packaging logs and failing for inspection."
+              mkdir -p /tmp/susfs_patch_rejects
+              cp "$PATCH_FILE" /tmp/susfs_patch_rejects/ || true
+              cp /tmp/patch_dryrun_p1.log /tmp/susfs_patch_rejects/ || true
+              cp /tmp/patch_dryrun_p0.log /tmp/susfs_patch_rejects/ || true
+              cp /tmp/git_apply.log /tmp/susfs_patch_rejects/ || true
+              cp /tmp/patch_targets.txt /tmp/susfs_patch_rejects/ || true
+              cp /tmp/patch_missing_files.txt /tmp/susfs_patch_rejects/ || true
+              tar -C /tmp -czf /tmp/susfs_patch_rejects.tar.gz susfs_patch_rejects || true
+              exit 1
+            fi
+            echo ">>> Patch applied or no rejects were produced. Continuing."
+          fi
+
+      - name: ⬆️ Upload SUSFS Patch Rejects (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: susfs-patch-rejects
+          path: |
+            /tmp/susfs_patch_rejects.tar.gz
+            /tmp/git_apply.log
+            /tmp/patch_dryrun_p1.log
+            /tmp/patch_dryrun_p0.log
+            /tmp/patch_targets.txt
+            /tmp/patch_missing_files.txt
+          retention-days: 7
+
+      - name: 🔨 Compile Kernel
+        if: success()
+        run: |
+          set -e
+          export PATH=$(pwd)/toolchain/clang/host/linux-x86/clang-r450784d/bin:$PATH
+          export PATH=$(pwd)/toolchain/build/kernel/build-tools/path/linux-x86/:$PATH
+
+          export HOSTCFLAGS="-I$(pwd)/toolchain/prebuilts/kernel-build-tools/linux-x86/include"
+          export HOSTLDFLAGS="-Wl,-rpath,$(pwd)/toolchain/prebuilts/kernel-build-tools/linux-x86/lib64 -L$(pwd)/toolchain/prebuilts/kernel-build-tools/linux-x86/lib64 -fuse-ld=lld --rtlib=compiler-rt"
+
+          export DTC_FLAGS="-@"
+          export PLATFORM_VERSION=15
+          export ANDROID_MAJOR_VERSION=v
+          export LLVM=1
+          export DEPMOD=depmod
+          export ARCH=arm64
+          export TARGET_SOC=s5e8535
+
+          echo ">>> 1. Generating Base Config..."
+          make s5e8535-m14xnsxx_defconfig
+
+          echo ">>> 2. Enabling KSU, SUSFS, and Mountify..."
+          scripts/config --enable CONFIG_KSU
+          scripts/config --enable CONFIG_KSU_SUSFS
+          scripts/config --enable CONFIG_KSU_INLINE_HOOK
+          scripts/config --enable CONFIG_TMPFS_XATTR
+          scripts/config --enable CONFIG_TMPFS_POSIX_ACL
+          scripts/config --enable CONFIG_KPROBES
+          scripts/config --enable CONFIG_HAVE_KPROBES
+          scripts/config --enable CONFIG_KPROBE_EVENTS
+          make olddefconfig
+
+          echo ">>> 3. Compiling (Using $(nproc) threads)..."
+          make -j$(nproc) 2>&1 | tee /tmp/kernel_build.log
+
+      - name: 📦 Collect Artifacts
+        if: success()
+        run: |
+          mkdir -p out/kernel
+          [ -f arch/arm64/boot/Image ] && cp arch/arm64/boot/Image out/kernel/
+          [ -f arch/arm64/boot/Image.gz ] && cp arch/arm64/boot/Image.gz out/kernel/
+          if [ -d arch/arm64/boot/dts/exynos ]; then
+            mkdir -p out/dtbs
+            find arch/arm64/boot/dts/exynos -name "*.dtb" | grep -i "s5e8535\|m14" | xargs -I{} cp {} out/dtbs/ 2>/dev/null || true
+          fi
+
+      - name: ⬆️ Upload Final Kernel
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-s5e8535-ksu-susfs
+          path: out/
+          retention-days: 30
+
+      - name: ⬆️ Upload Build Log (On Failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-failure
+          path: /tmp/kernel_build.log
+          retention-days: 7
