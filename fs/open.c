@@ -34,6 +34,7 @@
 #include <linux/compat.h>
 #include <linux/mnt_idmapping.h>
 #ifdef CONFIG_KSU_SUSFS
+#include <linux/susfs.h>
 #include <linux/susfs_def.h>
 #endif
 
@@ -406,6 +407,10 @@ extern bool ksu_su_compat_enabled __read_mostly;
 extern bool __ksu_is_allow_uid_for_current(uid_t uid);
 extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode,
 			int *flags);
+extern bool susfs_is_current_proc_umounted(void);
+#ifdef CONFIG_KSU_SUSFS_HIDDEN_NAME
+extern bool susfs_is_hidden_name(const char *name, int namlen, uid_t caller_uid);
+#endif
 #endif
 
 static long do_faccessat(int dfd, const char __user *filename, int mode, int flags)
@@ -449,6 +454,28 @@ retry:
 	res = user_path_at(dfd, filename, lookup_flags, &path);
 	if (res)
 		goto out;
+
+#ifdef CONFIG_KSU_SUSFS_HIDDEN_NAME
+	if (current_uid().val >= 10000 &&
+	    susfs_is_current_proc_umounted()) {
+		struct dentry *_d = path.dentry;
+		struct dentry *_par = _d->d_parent;
+		if (_par && _par != _d && _par->d_parent) {
+			int _plen = _par->d_name.len;
+			if ((_plen == 4 && !memcmp(_par->d_name.name, "data", 4)) ||
+			    (_plen == 3 && !memcmp(_par->d_name.name, "obb", 3))) {
+				struct dentry *_gp = _par->d_parent;
+				if (_gp->d_name.len == 7 &&
+				    !memcmp(_gp->d_name.name, "Android", 7) &&
+				    susfs_is_hidden_name(_d->d_name.name,
+				        _d->d_name.len, current_uid().val)) {
+					res = -ENOENT;
+					goto out_path_release;
+				}
+			}
+		}
+	}
+#endif
 
 	inode = d_backing_inode(path.dentry);
 
@@ -1247,6 +1274,12 @@ static long do_sys_openat2(int dfd, const char __user *filename,
 	struct open_flags op;
 	int fd = build_open_flags(how, &op);
 	struct filename *tmp;
+
+#ifdef CONFIG_KSU_SUSFS_UNICODE_FILTER
+	if (susfs_check_unicode_bypass(filename)) {
+		return -ENOENT;
+	}
+#endif
 
 	if (fd)
 		return fd;

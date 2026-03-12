@@ -8,6 +8,8 @@
 #include <linux/path.h>
 #include <linux/susfs_def.h>
 
+struct super_block;
+
 #define SUSFS_VERSION "v2.0.0"
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5,0,0)
 #define SUSFS_VARIANT "NON-GKI"
@@ -36,7 +38,6 @@ struct st_susfs_sus_path {
 struct st_susfs_sus_path_list {
 	struct list_head                        list;
 	struct st_susfs_sus_path                info;
-	char                                    target_pathname[SUSFS_MAX_LEN_PATHNAME];
 	size_t                                  path_len;
 };
 
@@ -54,7 +55,7 @@ struct st_susfs_hide_sus_mnts_for_non_su_procs {
 	bool                                    enabled;
 	int                                     err;
 };
-#endif
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
 
 /* sus_kstat */
 #ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
@@ -81,6 +82,25 @@ struct st_susfs_sus_kstat_hlist {
 	unsigned long                           target_ino;
 	struct st_susfs_sus_kstat               info;
 	struct hlist_node                       node;
+	struct rcu_head				rcu;
+};
+
+struct st_susfs_sus_kstat_redirect {
+	char                                    virtual_pathname[SUSFS_MAX_LEN_PATHNAME];
+	char                                    real_pathname[SUSFS_MAX_LEN_PATHNAME];
+	unsigned long                           spoofed_ino;
+	unsigned long                           spoofed_dev;
+	unsigned int                            spoofed_nlink;
+	long long                               spoofed_size;
+	long                                    spoofed_atime_tv_sec;
+	long                                    spoofed_mtime_tv_sec;
+	long                                    spoofed_ctime_tv_sec;
+	long                                    spoofed_atime_tv_nsec;
+	long                                    spoofed_mtime_tv_nsec;
+	long                                    spoofed_ctime_tv_nsec;
+	unsigned long                           spoofed_blksize;
+	unsigned long long                      spoofed_blocks;
+	int                                     err;
 };
 #endif
 
@@ -123,6 +143,7 @@ struct st_susfs_open_redirect_hlist {
 	char                                    target_pathname[SUSFS_MAX_LEN_PATHNAME];
 	char                                    redirected_pathname[SUSFS_MAX_LEN_PATHNAME];
 	struct hlist_node                       node;
+	struct rcu_head				rcu;
 };
 #endif
 
@@ -176,6 +197,9 @@ void susfs_set_hide_sus_mnts_for_non_su_procs(void __user **user_info);
 /* sus_kstat */
 #ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
 void susfs_add_sus_kstat(void __user **user_info);
+#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT_REDIRECT
+void susfs_add_sus_kstat_redirect(void __user **user_info);
+#endif
 void susfs_update_sus_kstat(void __user **user_info);
 void susfs_sus_ino_for_generic_fillattr(unsigned long ino, struct kstat *stat);
 void susfs_sus_ino_for_show_map_vma(unsigned long ino, dev_t *out_dev, unsigned long *out_ino);
@@ -219,5 +243,14 @@ void susfs_start_sdcard_monitor_fn(void);
 
 /* susfs_init */
 void susfs_init(void);
+
+#ifdef CONFIG_KSU_SUSFS_UNICODE_FILTER
+bool susfs_check_unicode_bypass(const char __user *filename);
+#endif
+
+#ifdef CONFIG_KSU_SUSFS_HIDDEN_NAME
+bool susfs_is_hidden_name(const char *name, int namlen, uid_t caller_uid);
+bool susfs_is_hidden_ino(struct super_block *sb, unsigned long ino);
+#endif
 
 #endif

@@ -18,6 +18,7 @@
 #include <linux/pagemap.h>
 #include <linux/compat.h>
 #ifdef CONFIG_KSU_SUSFS
+#include <linux/susfs.h>
 #include <linux/susfs_def.h>
 #include <linux/version.h>
 #endif
@@ -30,6 +31,9 @@
 
 #ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
 extern void susfs_sus_ino_for_generic_fillattr(unsigned long ino, struct kstat *stat);
+#endif
+#ifdef CONFIG_KSU_SUSFS_HIDDEN_NAME
+extern bool susfs_is_hidden_name(const char *name, int namlen, uid_t caller_uid);
 #endif
 
 /**
@@ -52,8 +56,9 @@ void generic_fillattr(struct user_namespace *mnt_userns, struct inode *inode,
 		      struct kstat *stat)
 {
 #ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
-	if (unlikely(test_bit(AS_FLAGS_SUS_KSTAT, &inode->i_mapping->flags)) &&
-		likely(susfs_is_current_proc_umounted()))
+	if (inode->i_mapping &&
+		unlikely(test_bit(AS_FLAGS_SUS_KSTAT, &inode->i_mapping->flags)) &&
+		likely(susfs_is_current_proc_umounted_app()))
 	{
 		susfs_sus_ino_for_generic_fillattr(inode->i_ino, stat);
 		stat->mode = inode->i_mode;
@@ -247,6 +252,12 @@ static int vfs_statx(int dfd, const char __user *filename, int flags,
 	unsigned lookup_flags = 0;
 	int error;
 
+#ifdef CONFIG_KSU_SUSFS_UNICODE_FILTER
+	if (susfs_check_unicode_bypass(filename)) {
+		return -ENOENT;
+	}
+#endif
+
 #ifdef CONFIG_KSU_SUSFS
 	if (likely(susfs_is_current_proc_umounted()) || !ksu_su_compat_enabled) {
 		goto orig_flow;
@@ -274,6 +285,29 @@ retry:
 	error = user_path_at(dfd, filename, lookup_flags, &path);
 	if (error)
 		goto out;
+
+#ifdef CONFIG_KSU_SUSFS_HIDDEN_NAME
+	if (current_uid().val >= 10000 &&
+	    susfs_is_current_proc_umounted()) {
+		struct dentry *_d = path.dentry;
+		struct dentry *_par = _d->d_parent;
+		if (_par && _par != _d && _par->d_parent) {
+			int _plen = _par->d_name.len;
+			if ((_plen == 4 && !memcmp(_par->d_name.name, "data", 4)) ||
+			    (_plen == 3 && !memcmp(_par->d_name.name, "obb", 3))) {
+				struct dentry *_gp = _par->d_parent;
+				if (_gp->d_name.len == 7 &&
+				    !memcmp(_gp->d_name.name, "Android", 7) &&
+				    susfs_is_hidden_name(_d->d_name.name,
+				        _d->d_name.len, current_uid().val)) {
+					path_put(&path);
+					error = -ENOENT;
+					goto out;
+				}
+			}
+		}
+	}
+#endif
 
 	error = vfs_getattr(&path, stat, request_mask, flags);
 	stat->mnt_id = real_mount(path.mnt)->mnt_id;
@@ -487,6 +521,12 @@ static int do_readlinkat(int dfd, const char __user *pathname,
 	int error;
 	int empty = 0;
 	unsigned int lookup_flags = LOOKUP_EMPTY;
+
+#ifdef CONFIG_KSU_SUSFS_UNICODE_FILTER
+	if (susfs_check_unicode_bypass(pathname)) {
+		return -ENOENT;
+	}
+#endif
 
 	if (bufsiz <= 0)
 		return -EINVAL;

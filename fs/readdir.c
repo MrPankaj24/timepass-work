@@ -27,6 +27,23 @@
 #ifdef CONFIG_KSU_SUSFS_SUS_PATH
 #include <linux/susfs_def.h>
 extern bool susfs_is_inode_sus_path(struct inode *inode);
+extern bool susfs_is_hidden_ino(struct super_block *sb, unsigned long ino);
+extern bool susfs_is_hidden_name(const char *name, int namlen, uid_t caller_uid);
+static inline bool susfs_should_hide_dirent(struct super_block *sb,
+						unsigned long ino,
+						const char *name,
+						int namlen)
+
+{
+	uid_t uid = current_uid().val;
+	if (uid < 10000)
+		return false;
+	if (!susfs_is_current_proc_umounted())
+		return false;
+	if (susfs_is_hidden_ino(sb, ino))
+		return true;
+	return susfs_is_hidden_name(name, namlen, uid);
+}
 #endif
 /*
  * Note the "unsafe_put_user() semantics: we goto a
@@ -155,7 +172,6 @@ static int fillonedir(struct dir_context *ctx, const char *name, int namlen,
 	struct old_linux_dirent __user * dirent;
 	unsigned long d_ino;
 #ifdef CONFIG_KSU_SUSFS_SUS_PATH
-	struct inode *inode;
 #endif
 
 	if (buf->result)
@@ -169,16 +185,8 @@ static int fillonedir(struct dir_context *ctx, const char *name, int namlen,
 		return -EOVERFLOW;
 	}
 #ifdef CONFIG_KSU_SUSFS_SUS_PATH
-	inode = ilookup(buf->sb, ino);
-	if (!inode) {
-		goto orig_flow;
-	}
-	if (susfs_is_inode_sus_path(inode)) {
-		iput(inode);
-		return 0;
-	}
-	iput(inode);
-orig_flow:
+	if (susfs_should_hide_dirent(buf->sb, ino, name, namlen))
+		return true;
 #endif
 	buf->result++;
 	dirent = buf->dirent;
@@ -258,7 +266,6 @@ static int filldir(struct dir_context *ctx, const char *name, int namlen,
 		sizeof(long));
 	int prev_reclen;
 #ifdef CONFIG_KSU_SUSFS_SUS_PATH
-	struct inode *inode;
 #endif
 
 	buf->error = verify_dirent_name(name, namlen);
@@ -272,22 +279,15 @@ static int filldir(struct dir_context *ctx, const char *name, int namlen,
 		buf->error = -EOVERFLOW;
 		return -EOVERFLOW;
 	}
-#ifdef CONFIG_KSU_SUSFS_SUS_PATH
-	inode = ilookup(buf->sb, ino);
-	if (!inode) {
-		goto orig_flow;
-	}
-	if (susfs_is_inode_sus_path(inode)) {
-		iput(inode);
-		return 0;
-	}
-	iput(inode);
-orig_flow:
-#endif
-
 	prev_reclen = buf->prev_reclen;
 	if (prev_reclen && signal_pending(current))
 		return -EINTR;
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+	if (susfs_should_hide_dirent(buf->sb, ino, name, namlen)) {
+		buf->error = 0;
+		return true;
+	}
+#endif
 	dirent = buf->current_dir;
 	prev = (void __user *) dirent - prev_reclen;
 	if (!user_write_access_begin(prev, reclen + prev_reclen))
@@ -367,7 +367,6 @@ static int filldir64(struct dir_context *ctx, const char *name, int namlen,
 		sizeof(u64));
 	int prev_reclen;
 #ifdef CONFIG_KSU_SUSFS_SUS_PATH
-	struct inode *inode;
 #endif
 
 	buf->error = verify_dirent_name(name, namlen);
@@ -380,16 +379,10 @@ static int filldir64(struct dir_context *ctx, const char *name, int namlen,
 	if (prev_reclen && signal_pending(current))
 		return -EINTR;
 #ifdef CONFIG_KSU_SUSFS_SUS_PATH
-	inode = ilookup(buf->sb, ino);
-	if (!inode) {
-		goto orig_flow;
+	if (susfs_should_hide_dirent(buf->sb, ino, name, namlen)) {
+		buf->error = 0;
+		return true;
 	}
-	if (susfs_is_inode_sus_path(inode)) {
-		iput(inode);
-		return 0;
-	}
-	iput(inode);
-orig_flow:
 #endif
 	dirent = buf->current_dir;
 	prev = (void __user *)dirent - prev_reclen;
@@ -477,7 +470,6 @@ static int compat_fillonedir(struct dir_context *ctx, const char *name,
 	struct compat_old_linux_dirent __user *dirent;
 	compat_ulong_t d_ino;
 #ifdef CONFIG_KSU_SUSFS_SUS_PATH
-	struct inode *inode;
 #endif
 
 	if (buf->result)
@@ -491,16 +483,8 @@ static int compat_fillonedir(struct dir_context *ctx, const char *name,
 		return -EOVERFLOW;
 	}
 #ifdef CONFIG_KSU_SUSFS_SUS_PATH
-	inode = ilookup(buf->sb, ino);
-	if (!inode) {
-		goto orig_flow;
-	}
-	if (susfs_is_inode_sus_path(inode)) {
-		iput(inode);
-		return 0;
-	}
-	iput(inode);
-orig_flow:
+	if (susfs_should_hide_dirent(buf->sb, ino, name, namlen))
+		return true;
 #endif
 	buf->result++;
 	dirent = buf->dirent;
@@ -574,7 +558,6 @@ static int compat_filldir(struct dir_context *ctx, const char *name, int namlen,
 		namlen + 2, sizeof(compat_long_t));
 	int prev_reclen;
 #ifdef CONFIG_KSU_SUSFS_SUS_PATH
-	struct inode *inode;
 #endif
 
 	buf->error = verify_dirent_name(name, namlen);
@@ -592,16 +575,10 @@ static int compat_filldir(struct dir_context *ctx, const char *name, int namlen,
 	if (prev_reclen && signal_pending(current))
 		return -EINTR;
 #ifdef CONFIG_KSU_SUSFS_SUS_PATH
-	inode = ilookup(buf->sb, ino);
-	if (!inode) {
-		goto orig_flow;
+	if (susfs_should_hide_dirent(buf->sb, ino, name, namlen)) {
+		buf->error = 0;
+		return true;
 	}
-	if (susfs_is_inode_sus_path(inode)) {
-		iput(inode);
-		return 0;
-	}
-	iput(inode);
-orig_flow:
 #endif
 	dirent = buf->current_dir;
 	prev = (void __user *) dirent - prev_reclen;

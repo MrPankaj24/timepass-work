@@ -18,6 +18,7 @@
 #define CMD_SUSFS_ADD_SUS_KSTAT 0x55570
 #define CMD_SUSFS_UPDATE_SUS_KSTAT 0x55571
 #define CMD_SUSFS_ADD_SUS_KSTAT_STATICALLY 0x55572
+#define CMD_SUSFS_ADD_SUS_KSTAT_REDIRECT 0x55573
 #define CMD_SUSFS_ADD_TRY_UMOUNT 0x55580 /* deprecated */
 #define CMD_SUSFS_SET_UNAME 0x55590
 #define CMD_SUSFS_ENABLE_LOG 0x555a0
@@ -41,11 +42,11 @@
 #define TRY_UMOUNT_DEFAULT 0 /* used by susfs_try_umount() */
 #define TRY_UMOUNT_DETACH 1 /* used by susfs_try_umount() */
 
-#define DEFAULT_KSU_MNT_ID 500000 /* used by mount->mnt_id */
+#define DEFAULT_UNSHARE_KSU_MNT_ID 400000 /* used for mounts unshared by ksu process */
+#define DEFAULT_KSU_MNT_ID 500000 /* used for mounts created or single cloned by ksu process */
 #define DEFAULT_KSU_MNT_GROUP_ID 5000 /* used by mount->mnt_group_id */
 
 /*
- * mount->mnt.susfs_mnt_id_backup => storing original mount's mnt_id
  * inode->i_mapping->flags => A 'unsigned long' type storing flag 'AS_FLAGS_', bit 1 to 31 is not usable since 6.12
  * nd->state => storing flag 'ND_STATE_'
  * nd->flags => storing flag 'ND_FLAGS_'
@@ -59,6 +60,7 @@
 #define AS_FLAGS_SUS_KSTAT 35
 #define AS_FLAGS_OPEN_REDIRECT 36
 #define AS_FLAGS_SUS_MAP 39
+#define AS_FLAGS_SUS_PATH_PARENT 41
 
 #define ND_STATE_LOOKUP_LAST 32
 #define ND_STATE_OPEN_LAST 64
@@ -74,4 +76,17 @@ static inline void susfs_set_current_proc_umounted(void) {
 	set_ti_thread_flag(&current->thread_info, TIF_PROC_UMOUNTED);
 }
 
+static inline bool susfs_is_current_proc_umounted_app(void) {
+	return test_ti_thread_flag(&current->thread_info, TIF_PROC_UMOUNTED);
+}
+
+// ZeroMount integration: extern when enabled, no-op helper when disabled
+#ifdef CONFIG_ZEROMOUNT
+extern bool zeromount_is_uid_blocked(uid_t uid);
+static inline bool susfs_is_uid_zeromount_excluded(uid_t uid) {
+	return zeromount_is_uid_blocked(uid);
+}
+#else
+static inline bool susfs_is_uid_zeromount_excluded(uid_t uid) { return false; }
+#endif
 #endif // #ifndef KSU_SUSFS_DEF_H
